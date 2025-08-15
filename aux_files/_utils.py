@@ -1,0 +1,309 @@
+import tempfile
+import os
+import fitz
+import logging
+from typing import List
+from dotenv import load_dotenv
+load_dotenv()
+
+from pinecone import Pinecone
+from streamlit.runtime.uploaded_file_manager import UploadedFile
+from langchain.text_splitter import RecursiveCharacterTextSplitter
+from langchain_openai import OpenAIEmbeddings
+from langchain_pinecone import PineconeVectorStore
+from langchain_community.document_loaders import (
+    TextLoader,
+    UnstructuredMarkdownLoader
+)
+from langchain.chains.history_aware_retriever import create_history_aware_retriever
+from langchain.chains.retrieval import create_retrieval_chain
+from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain_openai import ChatOpenAI
+from langchain import hub
+
+
+
+
+# Configuración del logger
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    datefmt='%Y-%m-%d %H:%M:%S'
+)
+logger = logging.getLogger(__name__)
+
+embeddings = OpenAIEmbeddings(model="text-embedding-3-small")
+
+def ingest_docs(uploaded_files: List[UploadedFile], assistant_id: str, index_name, delete_existing_files=False):
+    try:
+        if not os.path.exists("docs"):
+            os.makedirs("docs")
+            logger.info("Carpeta 'docs' creada")
+
+        # Verificar que existe la carpeta específica del índice
+        index_dir = os.path.join("docs", index_name)
+        if not os.path.exists(index_dir):
+            os.makedirs(index_dir)
+            logger.info(f"Carpeta '{index_dir}' creada")
+        # Inicializar cliente de Pinecone
+        pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+
+        # Comprobar si el índice existe
+        existing_indexes = [idx.name for idx in pc.list_indexes()]
+        index_exists = index_name in existing_indexes
+
+        if not index_exists:
+            # Crear el índice si no existe
+            logger.info(f"Creando nuevo índice: {index_name}")
+            pc.create_index(
+                name=index_name,
+                dimension=1536,  # Dimensión para text-embedding-3-small
+                metric="cosine",
+                spec={
+                    # "replicas": 1,
+                    # "shard_size": 1000,
+                    "serverless": {
+                        "cloud": "aws",
+                        "region": "us-east-1"  # o la región que prefieras
+                    }
+                }
+            )
+
+        all_documents = []
+
+        # Procesar cada archivo subido
+        for uploaded_file in uploaded_files:
+            # Crear un archivo temporal para guardarlo
+            with tempfile.NamedTemporaryFile(delete=False, suffix=os.path.splitext(uploaded_file.name)[1]) as temp_file:
+                temp_file.write(uploaded_file.getvalue())
+                temp_path = temp_file.name
+
+            # Procesar el archivo después de cerrar el bloque 'with'
+            try:
+                file_documents = []
+                if uploaded_file.name.endswith('.pdf'):
+                    # Extraer texto y enlaces del PDF
+                    pdf_doc = fitz.open(temp_path)
+                    full_text = ""
+                    for page_num in range(pdf_doc.page_count):
+                        page = pdf_doc.load_page(page_num)
+                        text = page.get_text()
+                        full_text += f"\n--- Página {page_num + 1} ---\n{text}"
+                        links = []
+                        for link in page.get_links():
+                            uri = link.get('uri')
+                            if uri:
+                                links.append(uri)
+                        # Crear documento con texto y enlaces en metadatos
+                        file_documents.append(type('Doc', (), {
+                            'page_content': text,
+                            'metadata': {
+                                'filename': uploaded_file.name,
+                                'filetype': uploaded_file.type,
+                                'assistant_id': assistant_id,
+                                'page': page_num + 1,
+                                'links': links
+                            }
+                        }))
+                    # Guardar el texto completo en docs/{index_name}/{filename}.txt
+                    output_dir = os.path.join("docs", index_name)
+                    os.makedirs(output_dir, exist_ok=True)
+                    output_path = os.path.join(output_dir, f"{os.path.splitext(uploaded_file.name)[0]}.txt")
+                    with open(output_path, "w", encoding="utf-8") as f:
+                        f.write(full_text)
+                    pdf_doc.close()
+                elif uploaded_file.name.endswith('.md'):
+                    loader = UnstructuredMarkdownLoader(temp_path)
+                    file_documents = loader.load()
+                elif uploaded_file.name.endswith(('.docx', '.txt', '.html', '.tf')):
+                    loader = TextLoader(temp_path, encoding="utf-8")
+                    file_documents = loader.load()
+                else:
+                    logger.warning(f"Tipo de archivo no soportado: {uploaded_file.name}")
+                    continue
+
+                logger.info(f"Cargados {len(file_documents)} documentos de {uploaded_file.name}")
+
+                # Añadir metadatos del archivo original (solo para los que no son PDF)
+                if not uploaded_file.name.endswith('.pdf'):
+                    for doc in file_documents:
+                        doc.metadata.update({
+                            "filename": uploaded_file.name,
+                            "filetype": uploaded_file.type,
+                            "assistant_id": assistant_id
+                        })
+
+                all_documents.extend(file_documents)
+
+            finally:
+                # Asegurar la eliminación del archivo temporal
+                os.unlink(temp_path)
+
+        # Salir si no hay documentos
+        if not all_documents:
+            logger.warning("No se pudieron cargar documentos válidos")
+            return
+
+        # Dividir en chunks
+        text_splitter = RecursiveCharacterTextSplitter(
+            chunk_size=1000,
+            chunk_overlap=50,
+        )
+        documents = text_splitter.split_documents(all_documents)
+        logger.info(f"Dividido en {len(documents)} chunks")
+
+        # Definir tamaño del lote
+        batch_size = 100
+        total_batches = (len(documents) + batch_size - 1) // batch_size
+
+        # Inicializar vectorstore con el índice existente
+        vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
+
+        # Si se indica que se deben eliminar archivos existentes
+        if delete_existing_files:
+            # Obtener nombres de archivos a insertar
+            filenames = [doc.metadata["filename"] for doc in all_documents if "filename" in doc.metadata]
+            filenames = list(set(filenames))  # Eliminar duplicados
+
+            if filenames:
+                # Eliminar vectores con estos nombres de archivo
+                vectorstore.delete(
+                    filter={"filename": {"$in": filenames}}
+                )
+                logger.info(f"Eliminados documentos anteriores para los archivos: {', '.join(filenames)}")
+
+        logger.info(f'Agregando {len(documents)} documentos a Pinecone en {total_batches} lotes')
+
+        # Procesar por lotes
+        for i in range(0, len(documents), batch_size):
+            batch = documents[i:i+batch_size]
+            end_idx = min(i+batch_size, len(documents))
+            logger.info(f"Procesando lote {i//batch_size + 1}/{total_batches} (documentos {i+1}-{end_idx})")
+
+            # Añadir documentos al índice existente
+            vectorstore.add_documents(batch)
+
+        logger.info("****Carga en el índice vectorial completada****")
+        return True
+
+    except Exception as e:
+        logger.error(f"Error: {e}")
+        return False
+
+
+def get_docs_by_index(index_name: str, limit: int = 10):
+    """
+    Obtiene documentos de un índice específico en Pinecone.
+
+    Args:
+        index_name (str): Nombre del índice del cual obtener los documentos.
+        limit (int): Número máximo de documentos a recuperar.
+
+    Returns:
+        list: Lista de documentos recuperados del índice.
+    """
+    try:
+        pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+        vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
+        docs = vectorstore.similarity_search("", k=limit)
+        return docs
+    except Exception as e:
+        logger.error(f"Error al obtener documentos del índice {index_name}: {e}")
+        return []
+
+def get_chunked_docs_by_index(index_name: str, limit: int = 10):
+    """
+    Obtiene documentos fragmentados de un índice específico en Pinecone.
+
+    Args:
+        index_name (str): Nombre del índice del cual obtener los documentos.
+        limit (int): Número máximo de documentos a recuperar.
+
+    Returns:
+        list: Lista de documentos fragmentados recuperados del índice.
+    """
+    try:
+        pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
+        vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
+        docs = vectorstore.similarity_search("", k=limit)
+        return [doc.page_content for doc in docs]
+    except Exception as e:
+        logger.error(f"Error al obtener documentos fragmentados del índice {index_name}: {e}")
+        return []
+
+
+def run_llm_on_index(query: str, chat_history: list, index_name: str):
+    """
+    Ejecuta el modelo de lenguaje utilizando el índice especificado para responder consultas.
+    """
+    try:
+        # Conexión al índice específico
+        vectorstore = PineconeVectorStore(
+            index_name=index_name,
+            embedding=embeddings
+        )
+
+        # Configurar el LLM
+        chat = ChatOpenAI(
+            verbose=True,
+            temperature=0,
+            model='gpt-4o-mini', 
+            max_tokens=4096
+        )
+        logger.info(f"Parámetros del modelo: temperature={chat.temperature}, max_tokens={chat.max_tokens}")
+
+        # Usar prompts y cadenas de LangChain
+        retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
+        stuff_documents_chain = create_stuff_documents_chain(chat, retrieval_qa_chat_prompt)
+
+        # Crear un retriever consciente del historial
+        rephrase_prompt = hub.pull("langchain-ai/chat-langchain-rephrase")
+        history_aware_retriever = create_history_aware_retriever(
+            llm=chat,
+            retriever=vectorstore.as_retriever(),
+            prompt=rephrase_prompt
+        )
+
+        # Crear la cadena de recuperación
+        qa = create_retrieval_chain(
+            retriever=history_aware_retriever,
+            combine_docs_chain=stuff_documents_chain
+        )
+
+        # Ejecutar la consulta
+        result = qa.invoke({"input": query, "chat_history": chat_history})
+
+        # Formatear el resultado
+        return {
+            "query": result['input'],
+            "result": result['answer'],
+            "source_documents": result['context']
+        }
+    except Exception as e:
+        logger.error(f"Error al ejecutar consulta en índice {index_name}: {e}")
+        return {
+            "query": query,
+            "result": f"Error al procesar la consulta: {str(e)}",
+            "source_documents": []
+        }
+
+
+def create_sources_string(source_urls):
+    """
+    Formatea las URLs de las fuentes para mostrarlas en la interfaz.
+    """
+    if not source_urls:
+        return ""
+
+    sources_list = list(set(source_urls))  # Eliminar duplicados
+    sources_list.sort()
+    sources_string = "Fuentes:\n"
+
+    for i, source in enumerate(sources_list):
+        sources_string += f"{i + 1}. {source}\n"
+
+    return sources_string
+
+
+if __name__ == "__main__":
+    pass
