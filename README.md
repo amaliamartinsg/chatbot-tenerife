@@ -10,23 +10,7 @@ Este proyecto implementa un asistente conversacional basado en inteligencia arti
 - **Interfaz web:** Desarrollada con Streamlit, con pestañas para entrenamiento y chat.
 - **Integración con Pinecone:** Almacena y recupera embeddings para búsquedas semánticas eficientes.
 
-## Estructura del proyecto
-```
-app.py                  # Interfaz principal Streamlit
-aux_files/_utils.py     # Funciones de procesamiento, embeddings y consulta LLM
-requirements.txt        # Dependencias del proyecto
-README.md               # Este archivo
-aux_files/              # Archivos auxiliares
-	_utils.py
-	...
-data/                   # Documentos de ejemplo
-	TENERIFE.pdf
-	...
-docs/                   # Documentos procesados y fragmentados
-	turism/
-		TENERIFE.txt
-		...
-```
+
 
 ## Instalación
 1. Clona el repositorio y accede a la carpeta del proyecto.
@@ -39,6 +23,7 @@ docs/                   # Documentos procesados y fragmentados
 	 PINECONE_API_KEY=tu_clave_pinecone
 	 OPENAI_API_KEY=tu_clave_openai
 	 ```
+	Está creado un .env.example para poder ver la estructura
 4. Ejecuta la aplicación:
 	 ```powershell
 	 streamlit run app.py
@@ -51,9 +36,3 @@ docs/                   # Documentos procesados y fragmentados
 ## Requisitos
 - Python 3.8+
 - Claves de API de Pinecone y OpenAI
-
-## Créditos
-Desarrollado por [Tu Nombre].
-
-## Licencia
-Este proyecto se distribuye bajo la licencia MIT.

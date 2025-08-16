@@ -32,63 +32,11 @@ def main():
         st.session_state.chat_histories[index_name]["used_fragments"] = {}
 
     # Crear las pestañas antes de usarlas
-    tabs = st.tabs(["Entrenamiento", "Chatbot"])
+    tabs = st.tabs(["Chatbot", "Entrenamiento"])
 
-    # Pestaña de entrenamiento
-    with tabs[0]:
-        # Módulo para mostrar el listado de documentos actualmente subidos al índice
-        docs = aux.get_docs_by_index(index_name, limit=30)
-        existing_filenames = set()
-        if docs:
-            st.markdown("### Documentos actualmente subidos para entrenamiento")
-            # Obtener nombres de archivos ya subidos (únicos)
-            existing_filenames = set(
-                doc.metadata.get("filename", "Desconocido") 
-                for doc in docs if hasattr(doc, "metadata")
-            )
-            # Mostrar solo nombres únicos
-            for filename in existing_filenames:
-                st.write(f"• {filename}")
-                
-        # Módulo para subir nuevos archivos al entrenamiento
-        st.markdown("### Subir archivos de entrenamiento (.tf, .txt, .md, .pdf, .docx, .html)")
-        uploaded_files = st.file_uploader(
-            "Selecciona uno o varios archivos para añadir al modelo:",
-            type=["tf", "txt", "md", "pdf", "docx", "html"],
-            accept_multiple_files=True,
-            key="file_uploader_train"
-        )       
-        progress_placeholder = st.empty()
-                
-        if uploaded_files:
-            # Filtrar archivos que no estén en existing_filenames
-            if existing_filenames:
-                files_to_add = [file for file in uploaded_files if file.name not in existing_filenames]
-            else:
-                files_to_add = [file for file in uploaded_files]
-            if not files_to_add:
-                st.warning("Este archivo ya ha sido añadido previamente.")
-            else:            
-                progress_bar = progress_placeholder.progress(0, text="Procesando archivos...")
-                with st.spinner("Procesando archivos y añadiendo al modelo..."):
-                    total_files = len(uploaded_files)
-                    success = True
-                    for idx, file in enumerate(uploaded_files):
-                        # Procesar cada archivo individualmente
-                        result = aux.ingest_docs([file], assistant_id="turism", index_name=index_name)
-                        if not result:
-                            success = False
-                        progress_bar.progress((idx + 1) / total_files, text=f"Procesando archivo {idx+1}/{total_files}")
-                    progress_bar.empty()
-                if success:
-                    st.success("Archivos añadidos correctamente al modelo.")
-                    st.session_state.is_trained = True
-                else:
-                    st.error("Error al procesar los archivos. Revisa el log para más detalles.")
-                    st.session_state.is_trained = False
 
     # Pestaña de chatbot
-    with tabs[1]:
+    with tabs[0]:
         # Obtener el estado del chat
         chat_state = st.session_state.chat_histories[index_name]
 
@@ -119,16 +67,21 @@ def main():
 
                 # Extraer respuesta sin fuentes
                 clean_response = ai_response
-                if "*fuentes utilizados:*" in ai_response:
-                    clean_response = ai_response.split("*fuentes utilizados:*")[0]
+                if "*fuentes utilizadas:*" in ai_response:
+                    clean_response = ai_response.split("*fuentes utilizadas:*")[0]
 
                 # Mensaje del asistente
                 with st.chat_message("assistant"):
                     st.markdown(clean_response)
 
-                    # Mostrar fuentes para este mensaje específico
+                    # Mostrar fuentes solo si la respuesta realmente las necesita
                     message_id = f"msg_{i}"
-                    if message_id in st.session_state.message_sources and st.session_state.message_sources[message_id]:
+                    show_sources = (
+                        message_id in st.session_state.message_sources
+                        and st.session_state.message_sources[message_id]
+                        and "*fuentes utilizadas:*" in ai_response
+                    )
+                    if show_sources:
                         st.markdown("**Fuentes utilizadas:**")
 
                         # Crear 4 columnas para las fuentes
@@ -231,6 +184,58 @@ def main():
                 st.session_state.show_fragment_dialog = False
 
     
+    # Pestaña de entrenamiento
+    with tabs[1]:
+        # Módulo para mostrar el listado de documentos actualmente subidos al índice
+        docs = aux.get_docs_by_index(index_name, limit=30)
+        existing_filenames = set()
+        if docs:
+            st.markdown("### Documentos actualmente subidos para entrenamiento")
+            # Obtener nombres de archivos ya subidos (únicos)
+            existing_filenames = set(
+                doc.metadata.get("filename", "Desconocido") 
+                for doc in docs if hasattr(doc, "metadata")
+            )
+            # Mostrar solo nombres únicos
+            for filename in existing_filenames:
+                st.write(f"• {filename}")
+                
+        # Módulo para subir nuevos archivos al entrenamiento
+        st.markdown("### Subir archivos de entrenamiento (.tf, .txt, .md, .pdf, .docx, .html)")
+        uploaded_files = st.file_uploader(
+            "Selecciona uno o varios archivos para añadir al modelo:",
+            type=["tf", "txt", "md", "pdf", "docx", "html"],
+            accept_multiple_files=True,
+            key="file_uploader_train"
+        )       
+        progress_placeholder = st.empty()
+                
+        if uploaded_files:
+            # Filtrar archivos que no estén en existing_filenames
+            if existing_filenames:
+                files_to_add = [file for file in uploaded_files if file.name not in existing_filenames]
+            else:
+                files_to_add = [file for file in uploaded_files]
+            if not files_to_add:
+                st.warning("Este archivo ya ha sido añadido previamente.")
+            else:            
+                progress_bar = progress_placeholder.progress(0, text="Procesando archivos...")
+                with st.spinner("Procesando archivos y añadiendo al modelo..."):
+                    total_files = len(uploaded_files)
+                    success = True
+                    for idx, file in enumerate(uploaded_files):
+                        # Procesar cada archivo individualmente
+                        result = aux.ingest_docs([file], assistant_id="turism", index_name=index_name)
+                        if not result:
+                            success = False
+                        progress_bar.progress((idx + 1) / total_files, text=f"Procesando archivo {idx+1}/{total_files}")
+                    progress_bar.empty()
+                if success:
+                    st.success("Archivos añadidos correctamente al modelo.")
+                    st.session_state.is_trained = True
+                else:
+                    st.error("Error al procesar los archivos. Revisa el log para más detalles.")
+                    st.session_state.is_trained = False
     
 if __name__ == "__main__":
     main()

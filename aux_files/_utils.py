@@ -147,7 +147,8 @@ def ingest_docs(uploaded_files: List[UploadedFile], assistant_id: str, index_nam
         # Dividir en chunks
         text_splitter = RecursiveCharacterTextSplitter(
             chunk_size=1000,
-            chunk_overlap=50,
+            chunk_overlap=200,
+            add_start_index=True
         )
         documents = text_splitter.split_documents(all_documents)
         logger.info(f"Dividido en {len(documents)} chunks")
@@ -191,13 +192,14 @@ def ingest_docs(uploaded_files: List[UploadedFile], assistant_id: str, index_nam
         return False
 
 
-def get_docs_by_index(index_name: str, limit: int = 10):
+def get_docs_by_index(index_name: str, limit: int = 7, chunked = False):
     """
     Obtiene documentos de un índice específico en Pinecone.
 
     Args:
         index_name (str): Nombre del índice del cual obtener los documentos.
         limit (int): Número máximo de documentos a recuperar.
+        chunked (bool): True si queremos los documentos fragmentados, False si no.
 
     Returns:
         list: Lista de documentos recuperados del índice.
@@ -206,29 +208,12 @@ def get_docs_by_index(index_name: str, limit: int = 10):
         pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
         vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
         docs = vectorstore.similarity_search("", k=limit)
-        return docs
+        if chunked:
+            return [doc.page_content for doc in docs]
+        else:
+            return docs
     except Exception as e:
         logger.error(f"Error al obtener documentos del índice {index_name}: {e}")
-        return []
-
-def get_chunked_docs_by_index(index_name: str, limit: int = 10):
-    """
-    Obtiene documentos fragmentados de un índice específico en Pinecone.
-
-    Args:
-        index_name (str): Nombre del índice del cual obtener los documentos.
-        limit (int): Número máximo de documentos a recuperar.
-
-    Returns:
-        list: Lista de documentos fragmentados recuperados del índice.
-    """
-    try:
-        pc = Pinecone(api_key=os.environ.get("PINECONE_API_KEY"))
-        vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
-        docs = vectorstore.similarity_search("", k=limit)
-        return [doc.page_content for doc in docs]
-    except Exception as e:
-        logger.error(f"Error al obtener documentos fragmentados del índice {index_name}: {e}")
         return []
 
 
@@ -238,23 +223,33 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
     """
     try:
         # Conexión al índice específico
-        vectorstore = PineconeVectorStore(
-            index_name=index_name,
-            embedding=embeddings
-        )
+        vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
 
         # Configurar el LLM
         chat = ChatOpenAI(
             verbose=True,
-            temperature=0,
+            temperature=0.15,
+            top_p=0.85,
             model='gpt-4o-mini', 
             max_tokens=4096
         )
-        logger.info(f"Parámetros del modelo: temperature={chat.temperature}, max_tokens={chat.max_tokens}")
+        logger.info(f"Parámetros del modelo: temperature={chat.temperature}, top_p={chat.top_p}, max_tokens={chat.max_tokens}")
 
-        # Usar prompts y cadenas de LangChain
-        retrieval_qa_chat_prompt = hub.pull("langchain-ai/retrieval-qa-chat")
-        stuff_documents_chain = create_stuff_documents_chain(chat, retrieval_qa_chat_prompt)
+        # Usar un prompt personalizado con instrucciones
+        from langchain.prompts import PromptTemplate
+        custom_prompt = PromptTemplate(
+            input_variables=["context", "input"],
+            template="""
+            Eres un asistente experto en turismo de Tenerife. Responde siempre en español, de forma clara y concisa.
+            Si no sabes la respuesta, simplemente indícalo.
+            Si has utilizado información de los documentos proporcionados en el contexto para responder, incluye al final la frase exacta '*fuentes utilizadas:*' seguida de las fuentes utilizadas.
+            Si la respuesta es un saludo o no requiere información de los documentos, no incluyas la frase '*fuentes utilizadas:*' ni ninguna referencia a fuentes.
+            Contexto: {context}
+            Pregunta: {input}
+            """
+        )
+
+        stuff_documents_chain = create_stuff_documents_chain(chat, custom_prompt)
 
         # Crear un retriever consciente del historial
         rephrase_prompt = hub.pull("langchain-ai/chat-langchain-rephrase")
@@ -272,6 +267,10 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
 
         # Ejecutar la consulta
         result = qa.invoke({"input": query, "chat_history": chat_history})
+
+        logger.info(f"Prompt utilizado: {result['input']}")
+        logger.info(f"Resultado de la consulta: {result['answer']}")
+        logger.info(f"Fuentes utilizadas: {result['context'][0].metadata.get('filename', []) if result['context'] else 'Ninguna fuente utilizada'}")
 
         # Formatear el resultado
         return {
