@@ -114,49 +114,57 @@ def main():
                 st.chat_message("user").write(st.session_state.current_prompt)
                 with st.chat_message("assistant"):
                     with st.spinner("Pensando..."):
-                        # Generar respuesta
-                        generated_response = aux.run_llm_on_index(
-                            query=st.session_state.current_prompt,
-                            chat_history=chat_state["chat_history"],
-                            index_name=index_name
-                        )
-
-                        # Crear un ID para este mensaje
-                        message_id = f"msg_{len(chat_state['user_prompt_history'])}"
-                        st.session_state.message_sources[message_id] = {}
-
-                        # Guardar fuentes específicas para este mensaje
-                        if "source_documents" in generated_response and generated_response["source_documents"]:
-                            for doc in generated_response["source_documents"]:
-                                if hasattr(doc, "metadata") and "filename" in doc.metadata:
-                                    fragment_key = f"{doc.metadata.get('filename')}_{doc.page_content[:30]}"
-                                    # Guardar en el historial general
-                                    if "used_fragments" not in chat_state:
-                                        chat_state["used_fragments"] = {}
-                                    if fragment_key not in chat_state["used_fragments"]:
-                                        chat_state["used_fragments"][fragment_key] = {
+                        try:
+                            # Generar respuesta
+                            generated_response = aux.run_llm_on_index(
+                                query=st.session_state.current_prompt,
+                                chat_history=chat_state["chat_history"],
+                                index_name=index_name
+                            )
+                            # Validar respuesta
+                            if not generated_response or "result" not in generated_response or not generated_response["result"]:
+                                raise ValueError("Respuesta inválida del asistente")
+                            # Crear un ID para este mensaje
+                            message_id = f"msg_{len(chat_state['user_prompt_history'])}"
+                            st.session_state.message_sources[message_id] = {}
+                            # Guardar fuentes específicas para este mensaje
+                            if "source_documents" in generated_response and generated_response["source_documents"]:
+                                for doc in generated_response["source_documents"]:
+                                    if hasattr(doc, "metadata") and "filename" in doc.metadata:
+                                        fragment_key = f"{doc.metadata.get('filename')}_{doc.page_content[:30]}"
+                                        # Guardar en el historial general
+                                        if "used_fragments" not in chat_state:
+                                            chat_state["used_fragments"] = {}
+                                        if fragment_key not in chat_state["used_fragments"]:
+                                            chat_state["used_fragments"][fragment_key] = {
+                                                "content": doc.page_content,
+                                                "metadata": doc.metadata
+                                            }
+                                        # Guardar para este mensaje específico
+                                        st.session_state.message_sources[message_id][fragment_key] = {
                                             "content": doc.page_content,
                                             "metadata": doc.metadata
                                         }
-                                    # Guardar para este mensaje específico
-                                    st.session_state.message_sources[message_id][fragment_key] = {
-                                        "content": doc.page_content,
-                                        "metadata": doc.metadata
-                                    }
-
-                        # Actualizar historial
-                        chat_state["user_prompt_history"].append(st.session_state.current_prompt)
-                        chat_state["chat_answers_history"].append(generated_response['result'])
-                        chat_state["chat_history"].append(("human", st.session_state.current_prompt))
-                        chat_state["chat_history"].append(("ai", generated_response["result"]))
-
-                        # Finalizar procesamiento
-                        st.session_state.is_processing = False
-                        st.session_state.current_prompt = None
-                        st.rerun()
+                            # Actualizar historial
+                            chat_state["user_prompt_history"].append(st.session_state.current_prompt)
+                            chat_state["chat_answers_history"].append(generated_response['result'])
+                            chat_state["chat_history"].append(("human", st.session_state.current_prompt))
+                            chat_state["chat_history"].append(("ai", generated_response["result"]))
+                        except Exception:
+                            # Si hay error, mostrar mensaje amigable
+                            error_msg = "El asistente no puede contestar en este momento. Por favor, inténtalo más tarde."
+                            chat_state["user_prompt_history"].append(st.session_state.current_prompt)
+                            chat_state["chat_answers_history"].append(error_msg)
+                            chat_state["chat_history"].append(("human", st.session_state.current_prompt))
+                            chat_state["chat_history"].append(("ai", error_msg))
+                        finally:
+                            # Finalizar procesamiento
+                            st.session_state.is_processing = False
+                            st.session_state.current_prompt = None
+                            st.rerun()
 
         # Input para nuevos mensajes
-        prompt = st.chat_input("Pregunta lo que quieras sobre Tenerife...")
+        prompt = st.chat_input("Pregunta lo que quieras...")
         if prompt and not st.session_state.is_processing:
             # Iniciar procesamiento
             st.session_state.is_processing = True

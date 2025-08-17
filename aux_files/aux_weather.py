@@ -1,13 +1,24 @@
 from typing import Optional, List, Union
 from pydantic import BaseModel, Field
+from langchain.agents import tool
 
 # Modelo Pydantic para los datos meteorológicos
+class WeatherInput(BaseModel):
+    location: str = Field(description="Ciudad de Tenerife para consultar el clima. Si no se especifica, usar 'Santa Cruz de Tenerife'.")
+    date: Optional[str] = Field(default=None, description="Fecha en formato YYYY-MM-DD. Si no se especifica, usar None.")
+
+    def __init__(self, **data):
+        if "date" in data and (data["date"] is None or data["date"] == ""):
+            data["date"] = None
+        super().__init__(**data)
+
 class WeatherInfo(BaseModel):
     fecha: str
-    temperaturas: Union[float, List[float]]
-    viento: Union[float, List[float]]
-    descripcion: str
+    ciudad: str
+    temperatura: Union[float, List[float]]
+    precipitacion: Optional[List[float]] = None
     humedad: Optional[List[float]] = None
+    viento: Union[float, List[float]]
 
 class WeatherError(BaseModel):
     error: str
@@ -15,30 +26,33 @@ class WeatherError(BaseModel):
 import requests
 from datetime import datetime
 
+# Calcular la media de cada parámetro si son listas
+def list_mean(val):
+    return round(sum(val) / len(val), 2) if isinstance(val, list) and len(val) > 0 else val
 
 def format_weather_info(weather_dict):
     if hasattr(weather_dict, 'error'):
         return weather_dict.error
-    elif not hasattr(weather_dict, 'humedad') or weather_dict.humedad is None:
-        return (
-            f"Pronóstico para Tenerife el {weather_dict.fecha}:\n"
-            f"- Temperatura actual: {weather_dict.temperaturas}\n"
-            f"- Viento actual: {weather_dict.viento}\n"
-            f"- Descripción actual: {weather_dict.descripcion}"
-        )
-    elif hasattr(weather_dict, 'temperaturas'):
-        return (
-            f"Pronóstico para Tenerife el {weather_dict.fecha}:\n"
-            f"- Temperaturas por hora: {weather_dict.temperaturas}\n"
-            f"- Humedad por hora: {weather_dict.humedad}\n"
-            f"- Viento por hora: {weather_dict.viento}\n"
-            f"- Descripción por hora: {weather_dict.descripcion}"
-        )
+    elif not hasattr(weather_dict, 'humedad') or weather_dict.humedad is None:        
+        return {
+            "fecha": weather_dict.fecha,
+            "ciudad": weather_dict.ciudad,
+            "temperatura": weather_dict.temperatura,
+            "viento": weather_dict.viento
+        }
+        
     else:
-        return "No se pudo obtener información meteorológica."
+        return {
+            "fecha": weather_dict.fecha,
+            "ciudad": weather_dict.ciudad,
+            "temperatura": list_mean(weather_dict.temperatura),
+            "precipitacion": list_mean(weather_dict.precipitacion),
+            "humedad": list_mean(weather_dict.humedad),
+            "viento": list_mean(weather_dict.viento)
+        }
 
-
-def get_weather_open_meteo(location: str, date: str = None):
+@tool
+def get_weather(location: str, date: str = None):
     """
     Obtiene el pronóstico del tiempo en una ubicación usando Open-Meteo (sin API key).
     Args:
@@ -47,6 +61,14 @@ def get_weather_open_meteo(location: str, date: str = None):
     Returns:
         dict: Información relevante del tiempo o mensaje de error.
     """
+    
+    
+    print(f"\n\n\nObteniendo el tiempo para {location} en la fecha {date}")
+    
+    
+    # Transformamos el nombre de la ubicación
+    location = location.strip().title()
+    location = location.replace(", Tenerife", "").replace(",Tenerife", "")
 
     # Geolocalización de la ciudad especificada
     geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={location}&count=1"
@@ -74,9 +96,9 @@ def get_weather_open_meteo(location: str, date: str = None):
                 weather = data["current_weather"]
                 weather_obj = WeatherInfo(
                     fecha=weather["time"],
-                    temperaturas=weather["temperature"],
-                    viento=weather["windspeed"],
-                    descripcion=f"Código meteorológico: {weather['weathercode']}"
+                    ciudad=location,
+                    temperatura=weather["temperature"],
+                    viento=weather["windspeed"]
                 )
                 return format_weather_info(weather_obj)
             else:
@@ -87,7 +109,7 @@ def get_weather_open_meteo(location: str, date: str = None):
         params = {
             "latitude": latitude,
             "longitude": longitude,
-            "hourly": "temperature_2m,weathercode,relative_humidity_2m,windspeed_10m",
+            "hourly": "temperature_2m,precipitation_probability,relative_humidity_2m,windspeed_10m",
             "start_date": date,
             "end_date": date,
             "timezone": "Europe/Madrid"
@@ -98,17 +120,14 @@ def get_weather_open_meteo(location: str, date: str = None):
             if "hourly" in data and "temperature_2m" in data["hourly"]:
                 weather_obj = WeatherInfo(
                     fecha=date,
-                    temperaturas=data["hourly"]["temperature_2m"],
+                    ciudad=location,
+                    temperatura=data["hourly"]["temperature_2m"],
+                    precipitacion=data["hourly"]["precipitation_probability"],
                     humedad=data["hourly"]["relative_humidity_2m"],
-                    viento=data["hourly"]["windspeed_10m"],
-                    descripcion=f"Códigos meteorológicos: {data['hourly']['weathercode']}"
+                    viento=data["hourly"]["windspeed_10m"]
                 )
                 return format_weather_info(weather_obj)
             else:
-                return WeatherError(error="No se encontró información meteorológica para esa fecha.").dict()
+                return WeatherError(error="No se encontró información meteorológica para esa fecha.")
         else:
-            return WeatherError(error=f"No se pudo obtener el pronóstico. Código: {response.status_code}").dict()
-
-if __name__ == "__main__":
-    print(get_weather_open_meteo(location="Santa Cruz de Tenerife"))
-    print(get_weather_open_meteo(location="Santa Cruz de Tenerife", date="2025-08-18"))
+            return WeatherError(error=f"No se pudo obtener el pronóstico. Código: {response.status_code}")

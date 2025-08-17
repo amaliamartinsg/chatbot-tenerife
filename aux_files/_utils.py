@@ -8,19 +8,23 @@ load_dotenv()
 
 from pinecone import Pinecone
 from streamlit.runtime.uploaded_file_manager import UploadedFile
+from langchain import hub
 from langchain.text_splitter import RecursiveCharacterTextSplitter
 from langchain_openai import OpenAIEmbeddings
+from langchain.prompts import PromptTemplate
 from langchain_pinecone import PineconeVectorStore
 from langchain_community.document_loaders import (
     TextLoader,
     UnstructuredMarkdownLoader
 )
+from langchain.agents import create_openai_functions_agent, AgentExecutor
+from langchain.tools import StructuredTool
 from langchain.chains.history_aware_retriever import create_history_aware_retriever
 from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
+from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
-from langchain import hub
-
+from aux_files.aux_weather import get_weather, WeatherInput
 
 
 
@@ -234,18 +238,41 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             max_tokens=4096
         )
         logger.info(f"Parámetros del modelo: temperature={chat.temperature}, top_p={chat.top_p}, max_tokens={chat.max_tokens}")
+        
+        # Configurar el Agente
+        from datetime import date
+        ano_actual = date.today().year                                                   
+        custom_agent_prompt = ChatPromptTemplate.from_messages([
+            ("system", f"""Eres un asistente experto en turismo de Tenerife. Responde siempre en español, de forma clara y concisa.
+                Tu tarea es recibir solicitudes sobre el tiempo meteorológico exclusivamente en Tenerife o cualquiera de sus ciudades, para una fecha concreta. Si la ciudad no pertenece a Tenerife, simplemente di que no tienes esa información.
+                Debes identificar y extraer la ciudad y la fecha por la que están preguntando (en formato YYYY-MM-DD) de la consulta del usuario.
+                Si no especifican la fecha, pásala vacía. Si especifican fecha pero no el año, fuerza el año como {ano_actual}. Si no especifican la ciudad, pásala como "Santa Cruz de Tenerife". 
+                Utiliza la función get_weather(location: str, date: Optional[str]) para obtener la información meteorológica.
+                Si no puedes extraer la ciudad o la fecha, indica que necesitas esa información.
+            """),
+            ("user", "{input}"),
+            MessagesPlaceholder(variable_name="agent_scratchpad"),
+        ])                                                
+
+        agent = create_openai_functions_agent(llm=chat, 
+                              tools=[get_weather], 
+                              prompt=custom_agent_prompt
+                )
+        executor = AgentExecutor(agent=agent, tools=[get_weather], verbose=True)
 
         # Usar un prompt personalizado con instrucciones
-        from langchain.prompts import PromptTemplate
         custom_prompt = PromptTemplate(
             input_variables=["context", "input"],
             template="""
             Eres un asistente experto en turismo de Tenerife. Responde siempre en español, de forma clara y concisa.
+            Si el contexto incluye información meteorológica, úsala para responder de manera precisa.
             Si no sabes la respuesta, simplemente indícalo.
             Si has utilizado información de los documentos proporcionados en el contexto para responder, incluye al final la frase exacta '*fuentes utilizadas:*' seguida de las fuentes utilizadas.
             Si la respuesta es un saludo o no requiere información de los documentos, no incluyas la frase '*fuentes utilizadas:*' ni ninguna referencia a fuentes.
-            Contexto: {context}
-            Pregunta: {input}
+            Contexto:
+            {context}
+            Pregunta:
+            {input}
             """
         )
 
@@ -265,26 +292,40 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             combine_docs_chain=stuff_documents_chain
         )
 
-        # Ejecutar la consulta
-        result = qa.invoke({"input": query, "chat_history": chat_history})
+        # --- 🔹 Detección simple de intención ---
+        needs_weather = any(word in query.lower() for word in ["tiempo", "clima", "lluvia", "temperatura"])
 
-        logger.info(f"Prompt utilizado: {result['input']}")
-        logger.info(f"Resultado de la consulta: {result['answer']}")
-        logger.info(f"Fuentes utilizadas: {result['context'][0].metadata.get('filename', []) if result['context'] else 'Ninguna fuente utilizada'}")
+        if needs_weather:
+            logger.info("Consulta detectada como meteorológica → usando agente")
+            response = executor.invoke({"input": query, "chat_history": chat_history})
+            context = f"Información meteorológica:\n{response['output']}"
+            logger.info(f"Contexto proporcionado al modelo: {context}")
+            result = qa.invoke({"input": query, "context": context, "chat_history": chat_history})
 
-        # Formatear el resultado
-        return {
-            "query": result['input'],
-            "result": result['answer'],
-            "source_documents": result['context']
-        }
+            return {
+                "query": result['input'],
+                "result": result['answer'],
+                "source_documents": [] 
+            }
+        else:
+            logger.info("Consulta normal → usando RAG")
+
+            # Ejecutar la consulta
+            result = qa.invoke({"input": query, "chat_history": chat_history})
+
+            logger.info(f"Prompt utilizado: {result['input']}")
+            logger.info(f"Resultado de la consulta: {result['answer']}")
+            logger.info(f"Fuentes utilizadas: {result['context'][0].metadata.get('filename', []) if result['context'] else 'Ninguna fuente utilizada'}")
+
+            # Formatear el resultado
+            return {
+                "query": result['input'],
+                "result": result['answer'],
+                "source_documents": result['context']
+            }
     except Exception as e:
         logger.error(f"Error al ejecutar consulta en índice {index_name}: {e}")
-        return {
-            "query": query,
-            "result": f"Error al procesar la consulta: {str(e)}",
-            "source_documents": []
-        }
+        raise ValueError(f"Error al ejecutar consulta en índice {index_name}: {e}")
 
 
 def create_sources_string(source_urls):

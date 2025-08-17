@@ -22,6 +22,7 @@ Este proyecto implementa un asistente conversacional basado en inteligencia arti
 	 ```env
 	 PINECONE_API_KEY=tu_clave_pinecone
 	 OPENAI_API_KEY=tu_clave_openai
+	 LANGCHAIN_TRACING_V2="false"
 	 ```
 	Está creado un .env.example para poder ver la estructura
 4. Ejecuta la aplicación:
