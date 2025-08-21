@@ -39,11 +39,15 @@ def get_weatherinput_prompt():
 
 
 
-# Configuración del logger
+LOG_FILE = os.path.join(os.path.dirname(__file__), '..', 'chatbot.log')
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
-    datefmt='%Y-%m-%d %H:%M:%S'
+    datefmt='%Y-%m-%d %H:%M:%S',
+    handlers=[
+        logging.FileHandler(LOG_FILE, encoding='utf-8'),
+        logging.StreamHandler()
+    ]
 )
 logger = logging.getLogger(__name__)
 
@@ -237,6 +241,7 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
     Ejecuta el modelo de lenguaje utilizando el índice especificado para responder consultas.
     """
     try:
+        logger.info(f"[AGENTE] Nueva consulta recibida: '{query}' | Historial: {chat_history} | Índice: {index_name}")
         # Conexión al índice específico
         vectorstore = PineconeVectorStore(index_name=index_name, embedding=embeddings)
 
@@ -248,7 +253,7 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             model='gpt-4o-mini', 
             max_tokens=4096
         )
-        logger.info(f"Parámetros del modelo: temperature={chat.temperature}, top_p={chat.top_p}, max_tokens={chat.max_tokens}")
+        logger.info(f"[AGENTE] Parámetros del modelo: temperature={chat.temperature}, top_p={chat.top_p}, max_tokens={chat.max_tokens}")
 
         # Usar un prompt personalizado con instrucciones
         custom_prompt = PromptTemplate(
@@ -269,6 +274,7 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
         stuff_documents_chain = create_stuff_documents_chain(chat, custom_prompt)
 
         # Crear un retriever consciente del historial
+        logger.info("[AGENTE] Descargando prompt de rephrase y configurando retriever...")
         rephrase_prompt = hub.pull("langchain-ai/chat-langchain-rephrase")
         history_aware_retriever = create_history_aware_retriever(
             llm=chat,
@@ -282,10 +288,11 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             combine_docs_chain=stuff_documents_chain
         )
 
-
         # Tool principal: RAG
         def llm_tool_func(input, chat_history=None):
+            logger.info(f"[AGENTE] Invocando QA chain con input: '{input}' y chat_history: {chat_history}")
             result = qa.invoke({"input": input, "chat_history": chat_history or []})
+            logger.info(f"[AGENTE] Resultado QA chain: {result}")
             return result
 
         retriever_tool = Tool(
@@ -325,6 +332,7 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             Únicamente si el usuario pregunta qué tiempo hará en una zona concreta, usa la herramienta `weather_tool` (si hacen referencia a alguna fecha inclúyela en la petición).
             Si en la respuesta se añade algo de 'context', incluye al final la frase exacta '*fuentes utilizadas:*' seguida de las fuentes utilizadas.
             """
+        logger.info("[AGENTE] Inicializando agente con herramientas...")
         agent = initialize_agent(
             tools=[retriever_tool, date_tool, weather_tool],
             llm=chat,
@@ -335,11 +343,15 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
         )
 
         # Ejecutar el retriever_tool para obtener los documentos consultados
+        logger.info("[AGENTE] Ejecutando retriever_tool para obtener documentos consultados...")
         retriever_output = retriever_tool.func(query, chat_history)
+        logger.info(f"[AGENTE] Documentos consultados: {retriever_output}")
         context_docs = retriever_output.get('context', []) if isinstance(retriever_output, dict) else []
 
         # Ejecutar el agente para obtener la respuesta final
+        logger.info("[AGENTE] Invocando agente para obtener respuesta final...")
         rag_result = agent.invoke({"input": query, "chat_history": chat_history})
+        logger.info(f"[AGENTE] Respuesta final del agente: {rag_result}")
 
         return {
             "query": rag_result.get('input', query),
