@@ -15,6 +15,7 @@ dist/
 .env
 .venv/
 *.venv/
+env-practica-llm/
 ProyectoJupyter/
 env/
 venv/
@@ -93,3 +94,4 @@ data/
 
 # --- Additional files to ignore ---
 Enunciado Entrega Final.pdf
+.streamlit/
