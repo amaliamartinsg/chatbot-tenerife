@@ -25,6 +25,7 @@ class WeatherError(BaseModel):
 
 import requests
 from datetime import datetime
+import re
 
 # Calcular la media de cada parámetro si son listas
 def list_mean(val):
@@ -51,6 +52,13 @@ def format_weather_info(weather_dict):
             "viento": list_mean(weather_dict.viento)
         }
 
+
+@tool
+def get_date_info():
+    """Devuelve la fecha y hora actual"""
+    return datetime.now().strftime("%d/%m/%Y %H:%M")
+
+
 @tool
 def get_weather(location: str, date: str = None):
     """
@@ -62,13 +70,18 @@ def get_weather(location: str, date: str = None):
         dict: Información relevante del tiempo o mensaje de error.
     """
     
-    
-    print(f"\n\n\nObteniendo el tiempo para {location} en la fecha {date}")
-    
-    
+    # Si date es None, intentamos extraer una fecha del parámetro location
+    if date is None:
+        match = re.search(r'(\d{4}-\d{2}-\d{2})', location)
+        if match:
+            date = match.group(1)
+            location = re.sub(r'\s*\d{4}-\d{2}-\d{2}\s*', '', location).strip()
+   
     # Transformamos el nombre de la ubicación
     location = location.strip().title()
-    location = location.replace(", Tenerife", "").replace(",Tenerife", "")
+    location = location.replace(", Tenerife", "").replace(",Tenerife", "").replace(",", "")
+       
+    print(f"\nObteniendo el tiempo para {location} en la fecha {date}")
 
     # Geolocalización de la ciudad especificada
     geo_url = f"https://geocoding-api.open-meteo.com/v1/search?name={location}&count=1"

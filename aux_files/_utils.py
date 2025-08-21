@@ -17,6 +17,8 @@ from langchain_community.document_loaders import (
     TextLoader,
     UnstructuredMarkdownLoader
 )
+from langchain.tools import Tool
+from langchain.agents import initialize_agent, AgentType
 from langchain.agents import create_openai_functions_agent, AgentExecutor
 from langchain.tools import StructuredTool
 from langchain.chains.history_aware_retriever import create_history_aware_retriever
@@ -24,7 +26,16 @@ from langchain.chains.retrieval import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_openai import ChatOpenAI
-from aux_files.aux_weather import get_weather, WeatherInput
+from aux_files.aux_weather import get_weather, WeatherInput, get_date_info
+
+# Genera el prompt de parámetros a partir de WeatherInput
+def get_weatherinput_prompt():
+    fields = WeatherInput.model_fields
+    prompt_lines = ["Parámetros requeridos para la función Tiempo_Meteorologico:"]
+    for name, field in fields.items():
+        tipo = field.annotation.__name__ if hasattr(field.annotation, "__name__") else str(field.annotation)
+        prompt_lines.append(f"- {name}: {tipo} — {field.description}")
+    return "\n".join(prompt_lines)
 
 
 
@@ -238,37 +249,16 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             max_tokens=4096
         )
         logger.info(f"Parámetros del modelo: temperature={chat.temperature}, top_p={chat.top_p}, max_tokens={chat.max_tokens}")
-        
-        # Configurar el Agente
-        from datetime import date
-        ano_actual = date.today().year                                                   
-        custom_agent_prompt = ChatPromptTemplate.from_messages([
-            ("system", f"""Eres un asistente experto en turismo de Tenerife. Responde siempre en español, de forma clara y concisa.
-                Tu tarea es recibir solicitudes sobre el tiempo meteorológico exclusivamente en Tenerife o cualquiera de sus ciudades, para una fecha concreta. Si la ciudad no pertenece a Tenerife, simplemente di que no tienes esa información.
-                Debes identificar y extraer la ciudad y la fecha por la que están preguntando (en formato YYYY-MM-DD) de la consulta del usuario.
-                Si no especifican la fecha, pásala vacía. Si especifican fecha pero no el año, fuerza el año como {ano_actual}. Si no especifican la ciudad, pásala como "Santa Cruz de Tenerife". 
-                Utiliza la función get_weather(location: str, date: Optional[str]) para obtener la información meteorológica.
-                Si no puedes extraer la ciudad o la fecha, indica que necesitas esa información.
-            """),
-            ("user", "{input}"),
-            MessagesPlaceholder(variable_name="agent_scratchpad"),
-        ])                                                
-
-        agent = create_openai_functions_agent(llm=chat, 
-                              tools=[get_weather], 
-                              prompt=custom_agent_prompt
-                )
-        executor = AgentExecutor(agent=agent, tools=[get_weather], verbose=True)
 
         # Usar un prompt personalizado con instrucciones
         custom_prompt = PromptTemplate(
             input_variables=["context", "input"],
             template="""
             Eres un asistente experto en turismo de Tenerife. Responde siempre en español, de forma clara y concisa.
-            Si el contexto incluye información meteorológica, úsala para responder de manera precisa.
-            Si no sabes la respuesta, simplemente indícalo.
-            Si has utilizado información de los documentos proporcionados en el contexto para responder, incluye al final la frase exacta '*fuentes utilizadas:*' seguida de las fuentes utilizadas.
-            Si la respuesta es un saludo o no requiere información de los documentos, no incluyas la frase '*fuentes utilizadas:*' ni ninguna referencia a fuentes.
+            # Si el contexto incluye información meteorológica, úsala para responder de manera precisa.
+            # Si no sabes la respuesta, simplemente indícalo.
+            # Si has utilizado información de los documentos proporcionados en el contexto para responder, incluye al final la frase exacta '*fuentes utilizadas:*' seguida de las fuentes utilizadas.
+            # Si la respuesta es un saludo o no requiere información de los documentos, no incluyas la frase '*fuentes utilizadas:*' ni ninguna referencia a fuentes.
             Contexto:
             {context}
             Pregunta:
@@ -292,37 +282,70 @@ def run_llm_on_index(query: str, chat_history: list, index_name: str):
             combine_docs_chain=stuff_documents_chain
         )
 
-        # --- 🔹 Detección simple de intención ---
-        needs_weather = any(word in query.lower() for word in ["tiempo", "clima", "lluvia", "temperatura"])
 
-        if needs_weather:
-            logger.info("Consulta detectada como meteorológica → usando agente")
-            response = executor.invoke({"input": query, "chat_history": chat_history})
-            context = f"Información meteorológica:\n{response['output']}"
-            logger.info(f"Contexto proporcionado al modelo: {context}")
-            result = qa.invoke({"input": query, "context": context, "chat_history": chat_history})
+        # Tool principal: RAG
+        def llm_tool_func(input, chat_history=None):
+            result = qa.invoke({"input": input, "chat_history": chat_history or []})
+            return result
 
-            return {
-                "query": result['input'],
-                "result": result['answer'],
-                "source_documents": [] 
-            }
-        else:
-            logger.info("Consulta normal → usando RAG")
+        retriever_tool = Tool(
+            name="Modelo_Lenguaje",
+            func=llm_tool_func,
+            description=(
+                "Responde a preguntas sobre Tenerife utilizando el modelo de lenguaje y los documentos proporcionados."
+            )
+        )
 
-            # Ejecutar la consulta
-            result = qa.invoke({"input": query, "chat_history": chat_history})
+        # Tool de la fecha
+        date_tool = Tool(
+            name="Info_Fechas",
+            func=get_date_info,
+            description=(
+                "Obtiene la fecha y hora actual."
+            )
+        )
+        
+        # Tool del tiempo
+        weather_tool = Tool(
+            name="Tiempo_Meteorologico",
+            func=get_weather,
+            description=(
+                get_weatherinput_prompt() +
+                "\nObtiene el clima de una ciudad de Tenerife para una fecha concreta dada. "
+                "Devuelve un JSON con la ciudad, fecha, temperatura_media (°C), "
+                "precipitacion (%), humedad (%) y viento (km/h). "
+                "Úsalo para dar al usuario una respuesta clara y natural en español."
+            )
+        )
 
-            logger.info(f"Prompt utilizado: {result['input']}")
-            logger.info(f"Resultado de la consulta: {result['answer']}")
-            logger.info(f"Fuentes utilizadas: {result['context'][0].metadata.get('filename', []) if result['context'] else 'Ninguna fuente utilizada'}")
+        # Configuramos el agente
+        system_prompt = """
+            Eres un asistente que responde usando las herramientas disponibles.
+            Si el usuario hace alguna referencia a fechas, SIEMPRE usa la herramienta `date_tool` para saber qué fecha es hoy y calcular la fecha en función de eso.
+            Únicamente si el usuario pregunta qué tiempo hará en una zona concreta, usa la herramienta `weather_tool` (si hacen referencia a alguna fecha inclúyela en la petición).
+            Si en la respuesta se añade algo de 'context', incluye al final la frase exacta '*fuentes utilizadas:*' seguida de las fuentes utilizadas.
+            """
+        agent = initialize_agent(
+            tools=[retriever_tool, date_tool, weather_tool],
+            llm=chat,
+            agent=AgentType.OPENAI_FUNCTIONS,
+            verbose=True,
+            handle_parsing_errors=True,
+            agent_kwargs={"system_message": system_prompt}
+        )
 
-            # Formatear el resultado
-            return {
-                "query": result['input'],
-                "result": result['answer'],
-                "source_documents": result['context']
-            }
+        # Ejecutar el retriever_tool para obtener los documentos consultados
+        retriever_output = retriever_tool.func(query, chat_history)
+        context_docs = retriever_output.get('context', []) if isinstance(retriever_output, dict) else []
+
+        # Ejecutar el agente para obtener la respuesta final
+        rag_result = agent.invoke({"input": query, "chat_history": chat_history})
+
+        return {
+            "query": rag_result.get('input', query),
+            "result": rag_result.get('output', ''),
+            "source_documents": context_docs
+        }
     except Exception as e:
         logger.error(f"Error al ejecutar consulta en índice {index_name}: {e}")
         raise ValueError(f"Error al ejecutar consulta en índice {index_name}: {e}")

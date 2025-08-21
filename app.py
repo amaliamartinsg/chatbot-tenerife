@@ -8,7 +8,7 @@ def main():
     st.set_page_config(layout="wide")
 
     # Nombre fijo del asistente
-    index_name = "turism"
+    index_name = "turismo"
 
     # Variable para saber si hay datos entrenados
     if "is_trained" not in st.session_state:
